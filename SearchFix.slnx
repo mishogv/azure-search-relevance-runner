@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/SearchFix.Runner/SearchFix.Runner.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/SearchFix.Tests/SearchFix.Tests.csproj" />
+  </Folder>
+</Solution>

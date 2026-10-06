@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Azure AI Search relevance — proposal</title>
+<style>
+  @page { size: A4; margin: 16mm 17mm 15mm 17mm; }
+  * { box-sizing: border-box; }
+  body { font: 10.2pt/1.34 "Segoe UI", Arial, sans-serif; color: #1b1b1b; margin: 0; }
+  h1 { font-size: 17pt; margin: 0 0 2px; letter-spacing: -0.2px; }
+  .sub { color: #555; margin: 0 0 12px; font-size: 9.6pt; }
+  h2 { font-size: 11.6pt; margin: 13px 0 4px; padding-bottom: 2px; border-bottom: 1px solid #d8d8d8; break-after: avoid; page-break-after: avoid; }
+  table, .kpi { break-inside: avoid; }
+  p { margin: 0 0 6px; }
+  ul, ol { margin: 0 0 6px 18px; padding: 0; }
+  li { margin: 0 0 3px; }
+  code { font: 9.4pt Consolas, "Courier New", monospace; background: #f3f3f3; padding: 0 3px; border-radius: 2px; }
+  table { border-collapse: collapse; width: 100%; margin: 4px 0 6px; font-size: 9.6pt; }
+  th, td { border: 1px solid #cfcfcf; padding: 3px 6px; text-align: left; vertical-align: top; }
+  th { background: #f0f0f0; font-weight: 600; }
+  td.n, th.n { text-align: right; white-space: nowrap; }
+  .kpi { display: flex; gap: 10px; margin: 6px 0 8px; }
+  .kpi div { flex: 1; border: 1px solid #cfcfcf; border-radius: 4px; padding: 5px 8px; }
+  .kpi b { display: block; font-size: 14pt; }
+  .kpi span { color: #555; font-size: 9pt; }
+  .small { font-size: 9.2pt; color: #444; }
+</style>
+</head>
+<body>
+
+<h1>Azure AI Search relevance — proposal</h1>
+<p class="sub">Mihail Petrov · Senior .NET engineer · 5 October 2026 · for the Senior .NET Backend assignment</p>
+
+<h2>1. What I did before writing this</h2>
+<p>I did not want to estimate a search problem from prose, so I reproduced it first. I loaded the 724 Index Data rows into a free-tier Azure AI Search index (one standard-analyzed <code>content</code> field, as the brief prescribes), copied <code>EncodeSpecialCharacters</code> and the <code>SearchMode</code> resolution verbatim into a small .NET 10 runner, and ran all 710 cases. Then I implemented Step 2 and Step 3 against the same sheet. Every run is saved as JSON and diffed case by case; 29 unit tests cover the workbook contract and the query-encoding decision table. The runner and results are attached.</p>
+<div class="kpi">
+  <div><b>488 / 710</b><span>baseline rows match the sheet's "In current result"</span></div>
+  <div><b>564 / 710</b><span>after Step 2 (query only, same index)</span></div>
+  <div><b>708 / 710</b><span>after Step 3 (analyzers + fielded query)</span></div>
+</div>
+
+<h2>2. Where I agree with the brief, and where I would differ</h2>
+<p><b>Agree.</b> The three mechanisms are real and the order is right: fix query construction first (deployable alone, one-line rollback), then the index. <code>SearchMode.Any</code> turns every two-word query into an OR, and the regex wrapper is structurally incapable of matching identifiers: Azure matches <code>/.*x.*/</code> against single lower-cased tokens, and <code>|</code> is not an operator in its Lucene syntax. Dropping the wrapper is a pure win, not a trade-off (regex queries also bypass BM25 scoring).</p>
+<p><b>Differ or add</b> — each point verified on the service, not assumed:</p>
+<ol>
+  <li><b>The "In current result" column is not what the code does.</b> 222 rows deviate, in a handful of explainable groups: 98 regression-guard rows marked "not found" are found today (bare type codes such as <code>PRT</code> return 100+ records; <code>O10099.nc</code> returns every .nc file); 65 "noise" rows marked "found" cannot be found on one field (<code>steel plate</code> shares no token with its target); 16 rows marked "currently works" need normalization that does not exist yet (<code>BAT10172119</code>); and the failure on quoted input is HTTP 400 "Failed to parse regex expression", not 500. I would treat the sheet as the target contract, not as a baseline, and re-baseline together before Step 2 lands.</li>
+  <li><b>Underscore and dotted digits do not split.</b> Analyze API output: <code>000_081_835</code> → one token, <code>DOC.1009.2063.19</code> → <code>doc</code> + <code>1009.2063.19</code>, <code>abcd.pdf</code> and <code>TURBINE.H</code> → one token each, <code>O10043.nc</code> → <code>o10043</code> + <code>nc</code>. That is the precise reason normalized identifiers cannot be fixed query-side, and why extension false positives only affect letter-digit filenames.</li>
+  <li><b>Sub-fields do not exist.</b> <code>content/exact</code> is not valid; the design uses three top-level fields fed from the same string. The prefix field indexes edge n-grams but is <em>searched</em> with the plain normalized analyzer, otherwise <code>000-081</code> would itself be n-grammed and match everything starting with <code>00</code>.</li>
+  <li><b>Normalize everything that is not a letter or digit</b>, not only <code>- _ .</code> and space: 113 documents end with zero-width spaces (U+200B) and <code>NC-4421-B_2#10.H</code> must match <code>NC4421B210H</code>. A keyword-tokenized field keeps U+200B inside the token, so the char filter strips it; the query encoder strips it too (six queries carry it inside the quotes).</li>
+  <li><b>Edge n-gram minimum 4, not 2</b>, and bare type codes are exact-match only. The shortest prefix case is <code>ITM7</code>; 78 regression-guard rows require <code>RCP</code>, <code>DOC</code>, <code>PRT</code> to return nothing. A single alphabetic token of three letters or fewer therefore queries only the exact field.</li>
+  <li><b>Escape set.</b> Full Lucene syntax needs <code>+ - &amp; | ! ( ) { } [ ] ^ " ~ * ? : \ /</code>; the current code misses <code>- * ? { }</code> and <code>/</code> (which opens a regex — one regression-guard query, <code>M-486300-1/4</code>, contains it). A leading <code>-</code> or <code>!</code> is a NOT and single negations are rejected, so those are escaped at term start. No case uses wildcards; I propose escaping <code>*</code> and <code>?</code> until a case says otherwise.</li>
+</ol>
+
+<h2>3. Plan</h2>
+<p><b>Step 1 — baseline and plan.</b> Done (this document, the runner, per-row results, the deviation groups above).</p>
+<p><b>Step 2 — query side.</b> Extract mode resolution into a pure function (no behaviour change, tests green) → default <code>SearchMode.All</code> → rewrite <code>EncodeSpecialCharacters</code> by a decision table: empty → <code>*</code>; strip U+200B; balanced quotes → phrase kept, inner specials escaped; unbalanced → quotes removed; plain text → specials escaped, no regex, no wrapper; the <code>OR</code>/<code>AND</code> keyword detection stays. Each commit is independently deployable. Measured on the sheet: all 98 Must-Suppress rows pass, all 43 quoted identifiers pass, no request errors; the Step-2 rows that remain are <code>ABRASIVE-DISC 115</code> (needs infix matching, see §5) and the lone <code>"</code> query.</p>
+<p><b>Step 3 — index side.</b> Three analyzers — <code>identifier_exact</code> (keyword, lowercase, trim), <code>identifier_normalized</code> (letters and digits only), <code>identifier_prefix</code> (normalized + edge n-grams 4–30, index side only) — on fields <code>content_exact</code>, <code>content_norm</code>, <code>content_prefix</code>, with a scoring profile exact 10 / normalized 5 / prefix 2 / standard 1. The query becomes fielded: a single token queries exact OR normalized OR prefix OR the standard field; several tokens query the whole input exactly and normalized, each identifier-like token exactly and normalized, OR all terms on the standard field. That rule is what lets <code>91260A27A04-01-00 seal ring</code> still find its part while <code>ITM-7723 component</code> does not pull in <code>ITM-7723-14.6</code>. Measured: 708 of 710, all four regression tabs green.</p>
+<p><b>Rollout.</b> Analyzer assignment is immutable per field, so production gets the new fields side by side: add analyzers and fields (<code>allowIndexDowntime</code>, seconds of downtime) and back-fill with <code>mergeOrUpload</code>, or build the new index next to the old one and swap with an alias. The query builder switches per endpoint behind a flag; the old field stays until the sheet passes against production data.</p>
+
+<h2>4. Testing approach</h2>
+<ul>
+  <li>The Excel sheet is the contract. The runner locates columns by header, runs each query with <code>top=100</code> against the chosen builder and index, asserts on <code>Searchable content</code> only (ordinal, untrimmed — U+200B included), records any rejected request as <code>ERROR</code>, and reports pass/fail by tab, category and <code>To fix in</code>.</li>
+  <li>Every run writes a JSON file; <code>compare a b</code> lists each case whose outcome changed, split into fixed and broken. That is the regression gate between steps and later between the dev and production indexes.</li>
+  <li>Unit tests (xUnit) cover the encoder decision table and mode resolution without Azure; tokenization is checked with the Analyze API, never guessed, and the token tables go into the report.</li>
+</ul>
+
+<h2>5. Risks and questions</h2>
+<ol>
+  <li><b>Baseline authority.</b> The sheet's current-result column was derived, not measured (§2.1). I propose we accept the real baseline as the starting point and keep the sheet as the target; otherwise Step 1 can never be "done".</li>
+  <li><b>Bare type codes.</b> The regression guard wants <code>RCP</code> to return nothing; the brief wants <code>nc</code> to return .nc files. Both are 2–3 letter tokens. My rule treats short alphabetic tokens as identifier evidence only; if extension-only search matters to operators, it needs its own rule (a known extension list) — please confirm which behaviour you want.</li>
+  <li><b>Infix matching.</b> <code>ABRASIVE-DISC 115</code> → <code>M-ABRASIVE-DISC 115X1</code> needs a substring match (<code>115</code> inside <code>115X1</code>). The three analyzers in the brief cannot do it; an infix n-gram field can, at an index-size cost. Decide per product.</li>
+  <li><b>Lone quote.</b> Two cases expect a specific document for the query <code>"</code>. After stripping the quote the query is <code>*</code> (724 documents); which 100 come back is arbitrary. I suggest asserting "no error" for these rows.</li>
+  <li><b>Production shape.</b> The sheet models one field and one index; production has an index per entity type plus a global endpoint, and presumably name/description fields. The fielded query and scoring profile must be applied per index, and the regression sheet must be run against real data before the alias swap.</li>
+  <li><b>Where do the zero-width spaces come from?</b> They look like copy-paste artefacts from an ERP or spreadsheet. Stripping them at ingestion is cheaper than carrying them through every analyzer.</li>
+</ol>
+
+<h2>6. Estimate</h2>
+<table>
+  <tr><th>Step</th><th class="n">Hours</th><th>Basis</th></tr>
+  <tr><td>1. Baseline, runner, this plan</td><td class="n">10</td><td>done; the hours are what it took, including the deviation analysis</td></tr>
+  <tr><td>2. Query-side fix in the real codebase: pure helper, decision table, unit tests, sheet run, PR</td><td class="n">8</td><td>small change; most of the time is tests and the regression run per endpoint</td></tr>
+  <tr><td>3. Analyzers, fields, fielded query and scoring profile per index; full sheet green on dev</td><td class="n">18</td><td>one rebuild loop per analyzer tweak; several indexes; real data surprises</td></tr>
+  <tr><td>4. Rollout: side-by-side index or new fields, alias swap, flag, production verification</td><td class="n">4</td><td>mostly waiting on rebuilds and reviewing production results</td></tr>
+  <tr><td><b>Total</b></td><td class="n"><b>40</b></td><td>30–40 h/week available, CET, start immediately</td></tr>
+</table>
+<p class="small">Attached: the runner (.NET 10, xUnit), per-row results for baseline / Step 2 / Step 3, and the deviation reports. I am happy to walk through any row live.</p>
+
+</body>
+</html>

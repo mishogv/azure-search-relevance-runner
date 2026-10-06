@@ -1,0 +1,8 @@
+bin/
+obj/
+.vs/
+*.user
+# the client's test sheet and per-row results stay private (shared with the client directly)
+data/*.xlsx
+results/
+proposal/*.pdf
