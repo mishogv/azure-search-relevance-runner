@@ -7,8 +7,8 @@ index and checks all 710 cases from `data/azure-search-test-cases.xlsx`. One com
 
 - `src/SearchFix.Runner` — console app: workbook loader, index definitions, query builders, test loop, run diff.
 - `tests/SearchFix.Tests` — xUnit: workbook contract (counts from the brief), query-encoding decision table.
-- `data/` — the Excel sheet exactly as provided (zero-width spaces included; never normalised).
-- `results/` — one JSON per run (`baseline.json`, `step2.json`, `step3.json`) for `compare`.
+- `data/` — put the client's `azure-search-test-cases.xlsx` here (not in the repo; it is the client's material). Read as provided: zero-width spaces included, never normalised.
+- `results/` — one JSON per run (`baseline.json`, `step2.json`, `step3.json`) for `compare`; `tools/deviations.py` groups a run's mismatches. Kept out of the repo for the same reason.
 
 ## Query variants
 
@@ -35,3 +35,11 @@ dotnet run --project src/SearchFix.Runner -- analyze standard.lucene "000_081_83
 The assert is always: run the query with `top=100` and check whether a document whose `content`
 equals the row's `Searchable content` (ordinal comparison, untrimmed) is in the result set.
 Any request the service rejects is recorded as `ERROR`, which is how the sheet marks HTTP 500 cases.
+
+## Measured on the sheet (free tier, 5 Oct 2026)
+
+| Run | Rows matching the sheet |
+|---|---|
+| current code, verbatim (vs. "In current result") | 488 / 710 |
+| step2 (vs. "Should be in result") | 564 / 710 |
+| step3 | 708 / 710 (remaining: one infix case, one lone-quote case) |
